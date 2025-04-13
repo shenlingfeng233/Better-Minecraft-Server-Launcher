@@ -149,7 +149,7 @@ class MinecraftLauncherGUI:
                 self.process.kill()
         self.root.destroy()
 
-
+# 启动
 if __name__ == "__main__":
     root = tk.Tk()
     app = MinecraftLauncherGUI(root)
