@@ -6,4 +6,4 @@ Color output with emphasis on warnings and errors
 # Precautions
 Please place this file in the same directory as the server's jar file
 # Packages that need to be installed
-tkinter & colorama
+colorama
