@@ -4,147 +4,160 @@
 
 import subprocess
 import threading
-import tkinter as tk
-from tkinter import filedialog, scrolledtext, messagebox, ttk
 import re
-from colorama import init
-
-init(autoreset=True)
+from remi import start, App
+from remi.gui import *
 
 LOG_COLORS = {
     "INFO": "green",
     "WARN": "orange",
     "ERROR": "red",
     "FATAL": "magenta",
-    "DEBUG": "cyan"
+    "DEBUG": "cyan",
+    "DEFAULT": "black"
 }
 
-class MinecraftLauncherGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Minecraft 启动器")
-        self.root.geometry("800x600")
-
+class MinecraftLauncherRemi(App):
+    def __init__(self, *args):
+        super(MinecraftLauncherRemi, self).__init__(*args)
         self.process = None
         self.players = []
-        self.create_widgets()
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.available_commands = set()
+        self.check_command_listening = False
+        self.output_thread = None
+        self.running = True
+        self.log_entries = []
 
-    def create_widgets(self):
-        frame = tk.Frame(self.root)
-        frame.pack(pady=10)
+    def main(self):
+        container = VBox(style={'width': '100%', 'padding': '10px'})
 
-        tk.Label(frame, text="最小内存:").grid(row=0, column=0)
-        self.min_mem_entry = tk.Entry(frame, width=10)
-        self.min_mem_entry.insert(0, "1G")
-        self.min_mem_entry.grid(row=0, column=1)
+        self.min_mem = TextInput(single_line=True, style={'margin': '5px'})
+        self.min_mem.set_text('1G')
+        self.max_mem = TextInput(single_line=True, style={'margin': '5px'})
+        self.max_mem.set_text('2G')
+        self.jar_path = TextInput(single_line=True, style={'margin': '5px'})
 
-        tk.Label(frame, text="最大内存:").grid(row=0, column=2)
-        self.max_mem_entry = tk.Entry(frame, width=10)
-        self.max_mem_entry.insert(0, "2G")
-        self.max_mem_entry.grid(row=0, column=3)
+        browse_button = Button('浏览', style={'margin': '5px'})
+        browse_button.onclick.connect(self.browse_jar)
+        start_button = Button('启动服务器', style={'margin': '5px'})
+        start_button.onclick.connect(self.start_server)
 
-        tk.Label(frame, text="Jar路径:").grid(row=1, column=0)
-        self.jar_entry = tk.Entry(frame, width=40)
-        self.jar_entry.grid(row=1, column=1, columnspan=3, padx=5, pady=5)
+        self.mem_label = Label('内存使用：--')
+        self.tps_label = Label('TPS：--')
+        self.players_label = Label('在线玩家：--')
 
-        tk.Button(frame, text="浏览", command=self.browse_jar).grid(row=1, column=4)
-        tk.Button(self.root, text="启动服务器", command=self.start_server).pack(pady=5)
+        self.cmd_input = TextInput(single_line=True, style={'margin': '5px'})
+        send_button = Button('发送指令', style={'margin': '5px'})
+        send_button.onclick.connect(self.send_command)
 
-        status_frame = tk.Frame(self.root)
-        status_frame.pack()
+        self.log_filter = DropDown.new_from_list(["ALL"] + list(LOG_COLORS.keys()), style={'margin': '5px'})
+        self.log_filter.select_by_value("ALL")
+        self.log_filter.onchange.connect(self.filter_logs)
 
-        self.memory_label = tk.Label(status_frame, text="内存使用：--", anchor="w", width=30)
-        self.memory_label.pack(side=tk.LEFT, padx=10)
+        self.log_search = TextInput(single_line=True, style={'margin': '5px'})
+        self.log_search.set_text("")
+        self.log_search.onchange.connect(self.filter_logs)
 
-        self.tps_label = tk.Label(status_frame, text="TPS：--", anchor="w", width=20)
-        self.tps_label.pack(side=tk.LEFT, padx=10)
+        self.player_list = ListView()
+        self.log_box = VBox(style={'margin': '5px', 'height': '300px', 'overflow': 'auto'})
 
-        self.players_label = tk.Label(status_frame, text="在线玩家：--", anchor="w", width=40)
-        self.players_label.pack(side=tk.LEFT, padx=10)
+        container.append(self.min_mem)
+        container.append(self.max_mem)
+        container.append(self.jar_path)
+        container.append(browse_button)
+        container.append(start_button)
+        container.append(self.mem_label)
+        container.append(self.tps_label)
+        container.append(self.players_label)
+        container.append(self.cmd_input)
+        container.append(send_button)
+        container.append(self.log_filter)
+        container.append(self.log_search)
+        container.append(self.player_list)
+        container.append(self.log_box)
 
-        self.log_box = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, height=15)
-        self.log_box.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        for level, color in LOG_COLORS.items():
-            self.log_box.tag_config(level, foreground=color)
-        self.log_box.tag_config("DEFAULT", foreground="white")
+        return container
 
-        cmd_frame = tk.Frame(self.root)
-        cmd_frame.pack(pady=5)
-
-        self.command_entry = tk.Entry(cmd_frame, width=50)
-        self.command_entry.pack(side=tk.LEFT, padx=5)
-
-        tk.Button(cmd_frame, text="发送指令", command=self.send_command).pack(side=tk.LEFT)
-
-        # 玩家列表
-        self.player_listbox = tk.Listbox(self.root)
-        self.player_listbox.pack(padx=10, pady=5, fill=tk.X)
-        self.player_listbox.bind("<Button-3>", self.on_player_right_click)
-
-    def browse_jar(self):
-        filepath = filedialog.askopenfilename(filetypes=[("JAR files", "*.jar")])
-        if filepath:
-            self.jar_entry.delete(0, tk.END)
-            self.jar_entry.insert(0, filepath)
+    def browse_jar(self, widget):
+        self.log("请手动输入 JAR 文件路径，目前不支持文件对话框", "WARN")
 
     def log(self, text, level="DEFAULT"):
-        self.log_box.insert(tk.END, text + "\n", level)
-        self.log_box.see(tk.END)
+        color = LOG_COLORS.get(level, "black")
+        entry = (level, text)
+        self.log_entries.append(entry)
+        if self.log_filter.get_value() in ["ALL", level] and self.log_search.get_text().lower() in text.lower():
+            label = Label(f"[{level}] {text}", style={"color": color, "font-family": "monospace", "font-size": "12px"})
+            self.log_box.append(label)
+
+    def filter_logs(self, widget=None):
+        selected_level = self.log_filter.get_value()
+        search_term = self.log_search.get_text().lower()
+        self.log_box.empty()
+        for level, text in self.log_entries:
+            if (selected_level == "ALL" or level == selected_level) and search_term in text.lower():
+                color = LOG_COLORS.get(level, "black")
+                label = Label(f"[{level}] {text}", style={"color": color, "font-family": "monospace", "font-size": "12px"})
+                self.log_box.append(label)
 
     def colorize_log(self, line):
         if "Used memory" in line or "Memory usage" in line:
-            self.memory_label.config(text=f"内存使用：{line.strip()}")
+            self.mem_label.set_text(f"内存使用：{line.strip()}")
         elif "TPS" in line:
-            self.tps_label.config(text=f"TPS：{line.strip()}")
+            self.tps_label.set_text(f"TPS：{line.strip()}")
         elif "There are" in line and "players online" in line:
-            self.players_label.config(text=f"在线玩家：{line.strip()}")
+            self.players_label.set_text(f"在线玩家：{line.strip()}")
             self.update_player_list(line)
-
         match = re.search(r"(INFO|WARN|ERROR|FATAL|DEBUG)", line)
         return match.group(1) if match else "DEFAULT"
 
-    def update_player_list(self, line):
-        match = re.search(r"players online: (.*)", line)
-        self.player_listbox.delete(0, tk.END)
-        self.players = []
-        if match:
-            players_str = match.group(1).strip()
-            if players_str:
-                players = [p.strip() for p in players_str.split(",")]
-                for p in players:
-                    self.players.append(p)
-                    self.player_listbox.insert(tk.END, p)
-
     def read_output(self):
-        for line in iter(self.process.stdout.readline, b''):
-            decoded_line = line.decode('utf-8', errors='ignore').strip()
-            level = self.colorize_log(decoded_line)
-            self.log(decoded_line, level)
+        try:
+            while self.running and self.process and self.process.poll() is None:
+                line = self.process.stdout.readline()
+                if not line:
+                    break
+                decoded_line = line.decode('utf-8', errors='ignore').strip()
+                if decoded_line:
+                    level = self.colorize_log(decoded_line)
+                    self.log(decoded_line, level)
+        except Exception as e:
+            self.log(f"读取输出时发生错误: {e}", "ERROR")
+        finally:
+            if self.process:
+                try:
+                    self.process.stdout.close()
+                except:
+                    pass
 
-    def send_command(self):
-        command = self.command_entry.get().strip()
-        if command and self.process and self.process.poll() is None:
+    def send_command(self, widget):
+        if not self.process or self.process.poll() is not None:
+            self.log("服务器未运行", "ERROR")
+            return
+        command = self.cmd_input.get_text().strip()
+        if command:
             try:
                 self.process.stdin.write((command + "\n").encode('utf-8'))
                 self.process.stdin.flush()
                 self.log(f"> {command}", "DEBUG")
-                self.command_entry.delete(0, tk.END)
+                self.cmd_input.set_text("")
             except Exception as e:
-                messagebox.showerror("发送失败", str(e))
-        else:
-            messagebox.showwarning("警告", "服务器未启动或已关闭。")
+                self.log(str(e), "ERROR")
 
-    def start_server(self):
-        jar = self.jar_entry.get().strip()
-        xms = self.min_mem_entry.get().strip()
-        xmx = self.max_mem_entry.get().strip()
-
-        if not jar:
-            messagebox.showerror("错误", "请指定 jar 文件路径")
+    def start_server(self, widget):
+        if self.process and self.process.poll() is None:
+            self.log("服务器已经在运行", "WARN")
             return
 
-        self.log_box.delete("1.0", tk.END)
+        jar = self.jar_path.get_text().strip()
+        xms = self.min_mem.get_text().strip()
+        xmx = self.max_mem.get_text().strip()
+        if not jar:
+            self.log("未指定 JAR 文件", "ERROR")
+            return
+
+        self.log_entries.clear()
+        self.log_box.empty()
+        self.running = True
 
         cmd = ["java", f"-Xms{xms}", f"-Xmx{xmx}", "-jar", jar, "nogui"]
 
@@ -156,50 +169,20 @@ class MinecraftLauncherGUI:
                 stdin=subprocess.PIPE,
                 bufsize=1
             )
-            threading.Thread(target=self.read_output, daemon=True).start()
+            self.output_thread = threading.Thread(target=self.read_output, daemon=True)
+            self.output_thread.start()
             self.log("服务器启动中...", "INFO")
-            self.root.after(5000, self.query_server_status)
+            self.check_command_listening = True
+            self.process.stdin.write(b"help\n")
+            self.process.stdin.flush()
         except Exception as e:
-            messagebox.showerror("启动失败", str(e))
+            self.log(str(e), "ERROR")
 
-    def query_server_status(self):
-        if self.process and self.process.poll() is None:
-            try:
-                self.process.stdin.write(b"memory\n")
-                self.process.stdin.write(b"tps\n")
-                self.process.stdin.write(b"list\n")
-                self.process.stdin.flush()
-            except:
-                pass
-            self.root.after(5000, self.query_server_status)
+    def update_player_list(self, line):
+        pass
 
-    def on_player_right_click(self, event):
-        selection = self.player_listbox.curselection()
-        if not selection:
-            return
-        player = self.player_listbox.get(selection[0])
-
-        menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label=f"踢出 {player}", command=lambda: self.kick_player(player))
-        menu.add_command(label=f"封禁 {player}", command=lambda: self.ban_player(player))
-        menu.tk_popup(event.x_root, event.y_root)
-
-    def kick_player(self, player):
-        self.send_command_to_server(f"kick {player}")
-
-    def ban_player(self, player):
-        self.send_command_to_server(f"ban {player}")
-
-    def send_command_to_server(self, cmd):
-        if self.process and self.process.poll() is None:
-            try:
-                self.process.stdin.write((cmd + "\n").encode('utf-8'))
-                self.process.stdin.flush()
-                self.log(f"> {cmd}", "WARN")
-            except Exception as e:
-                self.log(f"发送失败: {e}", "ERROR")
-
-    def on_closing(self):
+    def on_stop(self):
+        self.running = False
         if self.process and self.process.poll() is None:
             try:
                 self.log("正在关闭服务器...", "WARN")
@@ -207,11 +190,15 @@ class MinecraftLauncherGUI:
                 self.process.stdin.flush()
                 self.process.wait(timeout=10)
             except Exception as e:
-                self.log(f"正常关闭失败，尝试强制终止: {e}", "ERROR")
+                self.log(f"正常关闭失败: {e}", "ERROR")
                 self.process.kill()
-        self.root.destroy()
+            finally:
+                try:
+                    self.process.stdin.close()
+                    self.process.stdout.close()
+                except:
+                    pass
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = MinecraftLauncherGUI(root)
-    root.mainloop()
+    start(MinecraftLauncherRemi, address='0.0.0.0', port=8081, start_browser=True)
+
